@@ -11,7 +11,7 @@
 
 ## 为什么是 JavaAgent，而不是 ASM CoreMod
 
-这是查过 ModLauncher 10.x 源码后的结论，不是偷懒：
+这是查过 ModLauncher 10.x 源码后的结论：
 
 - 该类由 eventbus 自己的 `ILaunchPluginService`（`net.minecraftforge.eventbus.service.ModLauncherService`）
   实例化，ModLauncher 把 eventbus 作为 **PLUGIN 层**模块加载。
