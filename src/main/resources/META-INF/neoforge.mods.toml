@@ -1,0 +1,16 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+#issueTrackerURL = ""
+license = "MIT"
+
+[[mods]]
+modId = "quietit"
+version = "${version}"
+displayName = "QuietIt"
+#logoFile = "logo.png"
+authors = "Kasualix"
+#credits = ""
+description = '''
+
+'''
+#logoFile = ""

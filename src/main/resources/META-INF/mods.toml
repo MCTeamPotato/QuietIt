@@ -1,0 +1,20 @@
+modLoader = "javafml"
+loaderVersion = "[36,)"
+#issueTrackerURL = ""
+license = "MIT"
+
+[[mods]]
+modId = "quietit"
+version = "${version}"
+displayName = "QuietIt"
+#logoFile = "logo.png"
+authors = "Kasualix"
+#credits = ""
+description = '''
+Removes the two Logger#error(...) calls from net.minecraftforge.eventbus.EventSubclassTransformer.
+
+The actual patch is applied by quietit-<version>-agent.jar; attach it with:
+  -javaagent:<path>/quietit-<version>-agent.jar
+This mod jar alone does not change anything.
+'''
+#logoFile = ""

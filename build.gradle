@@ -1,0 +1,237 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+import net.darkhax.curseforgegradle.TaskPublishCurseForge
+import net.darkhax.curseforgegradle.UploadArtifact
+
+plugins {
+    id 'dev.architectury.loom' version '1.17-SNAPSHOT'
+    id "com.gradleup.shadow" version "8.3.9"
+    id 'net.darkhax.curseforgegradle' version '1.1.+'
+}
+
+boolean isNeo = loom.platform.get().displayName() == "NeoForge"
+boolean hasMixin = file("src/main/resources/${archives_name}.mixins.json").exists()
+boolean hasAccessTransformer = file("src/main/resources/META-INF/accesstransformer.cfg").exists()
+
+group = maven_group
+version = minecraft_version + "-" + mod_version
+
+base {
+    archivesName = archives_name
+}
+
+loom {
+    silentMojangMappingsLicense()
+
+    if (!isNeo) {
+        forge {
+            if (hasMixin) it.mixinConfig("${archives_name}.mixins.json")
+            
+            if (hasAccessTransformer) it.accessTransformer(file("src/main/resources/META-INF/accesstransformer.cfg"))
+            
+        }
+    }
+}
+
+repositories {
+    maven { url = 'https://files.minecraftforge.net/maven/' }
+    maven { url = 'https://maven.neoforged.net/releases' }
+    maven { url = 'https://maven.parchmentmc.org' }
+    maven { url = 'https://cursemaven.com' }
+}
+
+def versions = [
+        "1.20.1": [forge: "47.4.28", parchment: "2023.09.03", java: 17],
+        "1.21.1": [neo: "21.1.259",  parchment: "2024.11.17", java: 21]
+]
+
+def versionKeys = versions[minecraft_version]
+
+configurations {
+    // Only used to assemble the standalone -javaagent jar (shaded, relocated ASM).
+    agentShadow
+}
+
+dependencies {
+    minecraft "net.minecraft:minecraft:${minecraft_version}"
+
+    mappings loom.layered {
+        officialMojangMappings()
+        parchment("org.parchmentmc.data:parchment-${minecraft_version}:${versionKeys.parchment}@zip")
+    }
+
+    if (!isNeo) {
+        forge "net.minecraftforge:forge:${minecraft_version}-${versionKeys.forge}"
+    } else {
+        neoForge "net.neoforged:neoforge:${versionKeys.neo}"
+    }
+
+    if (!isNeo && hasMixin) {
+        shadow(annotationProcessor("io.github.llamalad7:mixinextras-common:0.5.5"))
+    }
+
+    // The agent jar needs its own copy of ASM because it runs in the system class loader, before and
+    // outside ModLauncher's module layers. compileOnly keeps ASM out of the mod jar (Forge provides it).
+    compileOnly "org.ow2.asm:asm-tree:${asm_version}"
+    agentShadow "org.ow2.asm:asm-tree:${asm_version}"
+    testImplementation "org.ow2.asm:asm-tree:${asm_version}"
+}
+
+configurations {
+    shadow
+    implementation.extendsFrom(shadow)
+}
+
+shadowJar {
+    configurations = [project.configurations.shadow]
+    if (!isNeo && hasMixin) {
+        relocate "com.llamalad7.mixinextras", "me.kall.${archives_name}.mixinextras"
+    }
+    mergeServiceFiles()
+    archiveClassifier = "dev-shadow"
+    exclude "LICENSE_MixinExtras"
+    // The java agent lives in its own self-contained jar (see agentJar below).
+    exclude "me/kall/quietit/agent/**"
+}
+
+jar {
+    exclude "me/kall/quietit/agent/**"
+}
+
+remapJar {
+    dependsOn tasks.named("shadowJar")
+    inputFile = shadowJar.archiveFile
+    archiveClassifier = null
+    exclude "LICENSE_MixinExtras"
+}
+
+// ---------------------------------------------------------------------------------------------------
+// QuietIt java agent
+//
+// net.minecraftforge.eventbus.EventSubclassTransformer is created by the "eventbus" ILaunchPluginService,
+// which ModLauncher loads into its PLUGIN layer. That layer is built with a plain ModuleClassLoader and is
+// never run through mod IClassTransformers, so an ASM CoreMod (ITransformationService) cannot see it.
+// A -javaagent transformer is invoked by the JVM for every defineClass call, regardless of layer, and it
+// sees the original jar bytes. The agent jar is therefore the actual feature of this project.
+// ---------------------------------------------------------------------------------------------------
+def agentJar = tasks.register("agentJar", ShadowJar) {
+    group = "build"
+    description = "Assembles the standalone -javaagent jar that silences the EventSubclassTransformer Logger#error calls."
+    archiveBaseName = archives_name
+    archiveClassifier = "agent"
+    from(sourceSets.main.output) {
+        include "me/kall/quietit/agent/**"
+    }
+    configurations = [project.configurations.agentShadow]
+    relocate "org.objectweb.asm", "me.kall.quietit.agent.shaded.asm"
+    exclude "module-info.class"
+    manifest {
+        attributes(
+                "Premain-Class": "me.kall.quietit.agent.QuietItAgent",
+                "Agent-Class": "me.kall.quietit.agent.QuietItAgent",
+                "Can-Retransform-Classes": "true",
+                "Implementation-Title": "QuietIt Java Agent",
+                "Implementation-Version": project.version
+        )
+    }
+}
+
+tasks.named("assemble") {
+    dependsOn agentJar
+}
+
+// Self-check: loads the real Forge eventbus class with the agent attached and verifies the two calls are gone.
+def agentJarFile = agentJar.get().archiveFile.get().asFile
+def agentSmokeDumpDir = layout.buildDirectory.dir("agent-smoke").get().asFile
+
+tasks.register("agentSmokeTest", JavaExec) {
+    group = "verification"
+    description = "Runs the agent against the real eventbus EventSubclassTransformer and checks the patched bytecode."
+    dependsOn agentJar
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass.set("me.kall.quietit.agent.AgentSmokeTest")
+    jvmArgs "-javaagent:${agentJarFile.absolutePath}"
+    systemProperty "quietit.dump.dir", agentSmokeDumpDir.absolutePath
+}
+
+tasks.register("agentSmokeTestControl", JavaExec) {
+    group = "verification"
+    description = "Same as agentSmokeTest but without the agent; the two Logger#error messages must be printed."
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass.set("me.kall.quietit.agent.AgentSmokeTest")
+    systemProperty "quietit.smoke.expectPatch", "false"
+}
+
+// The smoke test is a plain main class run through JavaExec, so the project intentionally has no JUnit tests.
+tasks.withType(Test).configureEach {
+    failOnNoDiscoveredTests = false
+}
+
+processResources {
+    inputs.property 'version', project.version
+    if (isNeo) {
+        filesMatching('META-INF/neoforge.mods.toml') {
+            expand version: project.version
+        }
+        exclude("META-INF/mods.toml")
+    } else {
+        filesMatching('META-INF/mods.toml') {
+            expand version: project.version
+        }
+        exclude("META-INF/neoforge.mods.toml")
+    }
+}
+
+java {
+    withSourcesJar()
+
+    JavaVersion javaVersion = JavaVersion.toVersion(versionKeys.java)
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = versionKeys.java
+}
+
+String changelog = file("CHANGELOG.md").getText("UTF-8")
+
+tasks.register("publishCurseForge", TaskPublishCurseForge) {
+    if (project_id != "0") {
+        apiToken = System.getenv("CURSEFORGE_TOKEN")
+        it.disableVersionDetection()
+
+        UploadArtifact mainFile = it.upload(project_id, remapJar)
+        mainFile.displayName = "${archives_name}-${project.version}"
+        mainFile.releaseType = "release"
+        mainFile.changelog = changelog
+        mainFile.changelogType = "markdown"
+        mainFile.addEnvironment("Server", "Client")
+        mainFile.addModLoader(isNeo ? "NeoForge" : "Forge")
+        mainFile.addJavaVersion("Java ${versionKeys.java}")
+        mainFile.addGameVersion(minecraft_version)
+
+        UploadArtifact sourceFile = mainFile.withAdditionalFile(sourcesJar)
+        sourceFile.changelog = changelog
+        sourceFile.changelogType = "markdown"
+    } else {
+        System.out.println("CurseForge project ID not found")
+    }
+}
+
+// Development convenience: attach the agent to the standard dev runs. Production modpacks only need
+// -javaagent:<quietit-agent.jar> on the game JVM.
+loom {
+    runs {
+        client {
+            vmArg "-javaagent:${agentJar.get().archiveFile.get().asFile.absolutePath}"
+        }
+        server {
+            vmArg "-javaagent:${agentJar.get().archiveFile.get().asFile.absolutePath}"
+        }
+    }
+}
+
+// Loom's addTaskBeforeRun() is a no-op in this version, so make the run tasks build the agent explicitly.
+tasks.matching { it.name == "runClient" || it.name == "runServer" }.configureEach {
+    dependsOn agentJar
+}
